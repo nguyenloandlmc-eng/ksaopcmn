@@ -1,0 +1,160 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local CONFIG = {
+	BotCount = 4,
+	AreaX = 30,                -- bot xuất hiện trong khoảng x từ -30 đến 30
+	BodyY = 4,                 -- độ cao tâm thân bot
+	ZMin = 40,
+	ZMax = 70,
+	StrafeRangeMin = 6,        -- biên độ di chuyển ngang
+	StrafeRangeMax = 14,
+	SpeedMin = 0.8,            -- tần số dao động (càng lớn càng nhanh)
+	SpeedMax = 2.0,
+	ShootCooldown = 0.08,      -- giây giữa hai phát bắn
+	MaxRayDistance = 600,
+	RespawnDelay = 0.4,
+}
+
+-- RemoteEvent để client báo "tôi bắn về hướng này"
+local shootEvent = Instance.new("RemoteEvent")
+shootEvent.Name = "Shoot"
+shootEvent.Parent = ReplicatedStorage
+
+local function makeStat(parent, name)
+	local v = Instance.new("IntValue")
+	v.Name = name
+	v.Parent = parent
+	return v
+end
+
+Players.PlayerAdded:Connect(function(player)
+	local stats = Instance.new("Folder")
+	stats.Name = "leaderstats"
+	stats.Parent = player
+	makeStat(stats, "Shots")
+	makeStat(stats, "Hits")
+	makeStat(stats, "Headshots")
+	makeStat(stats, "Accuracy") -- phần trăm
+end)
+
+----------------------------------------------------------------
+-- Bot
+----------------------------------------------------------------
+local bots = {} -- [model] = dữ liệu di chuyển
+
+local function createBot()
+	local rng = Random.new()
+	local baseX = rng:NextInteger(-CONFIG.AreaX, CONFIG.AreaX)
+	local z = rng:NextInteger(CONFIG.ZMin, CONFIG.ZMax)
+
+	local model = Instance.new("Model")
+	model.Name = "Bot"
+	model:SetAttribute("IsBot", true)
+
+	local body = Instance.new("Part")
+	body.Name = "Body"
+	body.Size = Vector3.new(2, 3, 1)
+	body.Anchored = true
+	body.Material = Enum.Material.SmoothPlastic
+	body.BrickColor = BrickColor.new("Bright blue")
+	body.CFrame = CFrame.new(baseX, CONFIG.BodyY, z)
+	body.Parent = model
+
+	local head = Instance.new("Part")
+	head.Name = "Head"
+	head.Shape = Enum.PartType.Ball
+	head.Size = Vector3.new(1.6, 1.6, 1.6)
+	head.Anchored = true
+	head.Material = Enum.Material.Neon
+	head.BrickColor = BrickColor.new("Bright red")
+	head.CFrame = body.CFrame * CFrame.new(0, 2.3, 0)
+	head.Parent = model
+
+	model.PrimaryPart = body
+	model.Parent = Workspace
+
+	bots[model] = {
+		baseX = baseX,
+		z = z,
+		range = rng:NextNumber(CONFIG.StrafeRangeMin, CONFIG.StrafeRangeMax),
+		freq = rng:NextNumber(CONFIG.SpeedMin, CONFIG.SpeedMax),
+		phase = rng:NextNumber(0, math.pi * 2),
+	}
+end
+
+local function removeBot(model)
+	bots[model] = nil
+	model:Destroy()
+	task.delay(CONFIG.RespawnDelay, createBot)
+end
+
+RunService.Heartbeat:Connect(function()
+	local t = os.clock()
+	for model, d in pairs(bots) do
+		if model.Parent then
+			local offset = math.sin(t * d.freq + d.phase) * d.range
+			model:PivotTo(CFrame.new(d.baseX + offset, CONFIG.BodyY, d.z))
+		end
+	end
+end)
+
+for _ = 1, CONFIG.BotCount do
+	createBot()
+end
+
+----------------------------------------------------------------
+-- Xử lý phát bắn
+----------------------------------------------------------------
+local lastShot = {} -- [player] = thời điểm bắn gần nhất
+
+local function updateAccuracy(stats)
+	local shots = stats.Shots.Value
+	if shots > 0 then
+		stats.Accuracy.Value = math.floor(stats.Hits.Value / shots * 100 + 0.5)
+	end
+end
+
+shootEvent.OnServerEvent:Connect(function(player, targetPos)
+	-- Kiểm tra dữ liệu từ client, không tin mù quáng
+	if typeof(targetPos) ~= "Vector3" then return end
+
+	local now = os.clock()
+	if lastShot[player] and now - lastShot[player] < CONFIG.ShootCooldown then return end
+	lastShot[player] = now
+
+	local character = player.Character
+	local stats = player:FindFirstChild("leaderstats")
+	local head = character and character:FindFirstChild("Head")
+	if not (stats and head) then return end
+
+	local direction = targetPos - head.Position
+	if direction.Magnitude < 1 then return end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {character}
+
+	local result = Workspace:Raycast(head.Position, direction.Unit * CONFIG.MaxRayDistance, params)
+
+	stats.Shots.Value += 1
+
+	if result then
+		local model = result.Instance.Parent
+		if model and model:GetAttribute("IsBot") and bots[model] then
+			stats.Hits.Value += 1
+			if result.Instance.Name == "Head" then
+				stats.Headshots.Value += 1
+			end
+			removeBot(model)
+		end
+	end
+
+	updateAccuracy(stats)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	lastShot[player] = nil
+end)
